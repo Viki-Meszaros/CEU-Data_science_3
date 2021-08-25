@@ -1,0 +1,575 @@
+---
+title: "How I met your mother text analysis"
+author: "Viktória Mészáros"
+date: "23/05/2021"
+output:
+  prettydoc::html_pretty:
+    toc: yes
+    number_sections: yes
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=F}
+library(tidyverse)
+library(stringr)
+library(tidytext)
+library(plotly)
+library(data.table)
+library(visNetwork)
+library(igraph)
+library(sentimentr)
+library(textstem)
+library(topicmodels)
+
+
+data <- read.csv("https://raw.githubusercontent.com/Viki-Meszaros/CEU-Data_science_3/main/HIMYM_data.csv")
+data$X <- NULL
+
+```
+
+## Aim
+In this project my aim is to use some cool NLP tools to get some insights about **How I met your mother**, which is one of my all time favourite series. I scraped data about the transcript for all the episodes from [Foreever Dreaming](https://transcripts.foreverdreaming.org/viewforum.php?f=177). You can find the codes I used for scraping [here](https://github.com/Viki-Meszaros/CEU-Data_science_3/blob/main/Scrape_transcripts.R).
+
+## Data
+The series has 9 seasons with a total of 208 episodes. You can see on the below graph how many episodes are in each season. I scraped a data that does not only contain the transcript, the lines but also that who said them. This is really important as I would like to do analysis by characters. The chart on the right also show how many lines each season contains. Lines refer to the separate parts the characters say. There is an issue as in the last three episodes the numbers are really low. This is because there were no character names in the transcripts on the website I scraped my data from. We cannot do anything with this as wa cannot fill in who said a given sentence. For this reason unfortunately I had to exclude these episodes from my analysis.
+
+```{r, echo=F, message=F, warning=F, out.width="50%"}
+data %>% 
+  group_by(season) %>% 
+  summarise(num_episodes = length(unique(episode))) %>% 
+  ggplot(aes(as.factor(season), num_episodes)) +
+  geom_col(fill = "deeppink4", alpha = 0.8, width = 2/3) + 
+  geom_text(aes(label = num_episodes), size = 4, position = position_stack(vjust = 0.5)) +
+  labs(title = "Number of episodes in each season",
+       x = "Season", y = "Number of episodes") +
+  theme_light()
+
+data %>% 
+  group_by(season) %>% 
+  summarise(num_lines = n()) %>% 
+  ggplot(aes(as.factor(season), num_lines)) +
+  geom_col(fill = "cyan4", alpha = 0.8, width = 2/3) + 
+  geom_text(aes(label = num_lines), size = 4, position = position_stack(vjust = 0.5)) +
+  labs(title = "Number of lines in each season",
+       subtitle = "Lines refer to sentences spoken by the characters",
+       x = "Season", y = "Number of lines") +
+  theme_light()
+```
+
+I decided to exclude all episodes that had less than 100 lines in them. This limit is chosen arbitrarily, but works quite well as the average lines move around 200 so drawing the line at 100 also makes sure episodes with less lines are included but those where there are no characters are left out. I also decided to exclude the 7th season as there are only data about 3 episodes which can give misleading results.
+
+```{r, echo=F, message=F, warning=F, fig.align='center', out.width="50%"}
+data <- data %>% 
+  group_by(season, episode) %>% 
+  mutate(lines = n()) %>% 
+  ungroup()
+
+data <- data %>% 
+  filter(lines >= 100)
+
+data %>% 
+  group_by(season) %>% 
+  summarise(num_episodes = length(unique(episode))) %>% 
+  ggplot(aes(as.factor(season), num_episodes)) +
+  geom_col(fill = "deeppink4", alpha = 0.8, width = 2/3) + 
+  geom_text(aes(label = num_episodes), size = 4, position = position_stack(vjust = 0.5)) +
+  labs(title = "Number of episodes in each season",
+    x = "Season", y = "Number of episodes") +
+  theme_light()
+
+data <- data %>% 
+  filter(season != "7")
+
+```
+
+
+According to the data set the series contain more than 900 characters. Lets look which are the most important by looking at the number of lines each one has.
+
+```{r, echo=F, message=F, warning=F, fig.align='center', out.width="50%"}
+
+data %>% group_by(actor) %>% 
+  summarize(lines = n()) %>% 
+  arrange(desc(lines)) %>% 
+  top_n(10) %>%
+  ggplot(aes(reorder(actor, lines), lines)) +
+  geom_col(fill = 'cyan4', alpha = 0.8) +
+  geom_text(aes(label = lines), size = 4, position = position_stack(vjust = 0.5)) +
+  labs(title = 'Number of lines by charachters (top 10)',
+       x = NULL, y = NULL) +
+  coord_flip() +
+  theme_light()
+
+data <- data %>% filter(actor %in% c("Ted", "Barney", "Marshall", "Robin", "Lily"))
+
+data <- data %>% 
+  mutate(actor = as.factor(actor),
+         season = as.factor(season))
+
+```
+
+As anyone familiar with the series would guess the most important characters are Ted, Barney, Marshall, Robin and Lily. I decided to include only the lines from them in my analysis and drop all other actors. With this I kept around 80% of my data.
+
+When looking at the amount of lines of each character by season we can see that the main character is Ted in all of the seasons. He is telling the story how he met the mother of his children, so this is pretty reasonable. The order is almost the same in all seasons.
+
+```{r, echo=F, message=F, warning=F, fig.align='center', out.width="60%"}
+data %>% 
+  group_by(season, actor) %>% 
+  summarize(Count = n()) %>% 
+  arrange(desc(Count)) %>% 
+  group_by(season) %>% 
+  top_n(5) %>% 
+  ungroup() %>% 
+  mutate(actor = reorder_within(actor, Count, season)) %>% 
+  ggplot(aes(actor, Count, fill = season)) +
+  geom_col(show.legend = F) +
+  labs(title = 'Number of lines by charachters in each season',
+       x = NULL, y = NULL) +
+  coord_flip() +
+  scale_x_reordered() +
+  facet_wrap(~season, scales = 'free') +
+  theme_light()
+```
+
+Lets also look at how the number of lines change by episodes. We see some fluctuation as different episodes have different characters in focus but overall the trend are linear, except for Ted. For him it declines as in the beginning the story is really built around him telling his stories to his children but then when we already now the basics there is no need for a lot a commertary from him.
+
+```{r, echo=F, message=F, warning=F, fig.align='center', out.width="60%"}
+# Create episode num
+data <- data %>% 
+  group_by(season, episode) %>% 
+  mutate(episode_num = cur_group_id()) %>% 
+  ungroup() 
+
+data %>% 
+  group_by(episode_num, actor) %>% 
+  summarise(num_lines = n()) %>% 
+  ggplot(aes(episode_num, num_lines, color = actor)) +
+  geom_line(show.legend = F) +
+  geom_smooth(method = lm, show.legend = F) +
+  facet_wrap(~actor) + 
+  labs(title = "Number of lines through the episodes by people",
+       x = "Episode", y = "Number of lines") +
+  theme_light() 
+ 
+```
+
+
+## Most frequent words
+
+I started to dig deeper in the text by looking at most frequent words. On the left chart you can see the most frequent words in the whole series. Most of them are the names of the characters as they call each other most often when they speak. These are not really meaningful so I excluded them for the chart on the right. The words there tell a bit more about the series. For example love girl(s) and guy(s) are key aspects of the series. 
+
+```{r, include=F}
+data$text <- trimws(str_replace_all(data$text, '\\[(.*?)\\]', ''))
+```
+
+
+```{r, echo=F, message=F, warning=F, fig.align='center', out.width="50%"}
+data %>% 
+  unnest_tokens(word, text) %>% 
+  anti_join(bind_rows(data.frame(word = stop_words$word), 
+                      data.frame(word = stopwords::stopwords(source = 'smart')))) %>% 
+  count(word, sort = T) %>% 
+  top_n(10, wt = n) %>%
+  ggplot(aes(reorder(word, n), n)) +
+  geom_col(fill = "cyan4", alpha = 0.8, show.legend = F) +
+  labs(title = 'Most frequent words in the series',
+       x = NULL, y = NULL) +
+  coord_flip() +
+  scale_x_reordered() +
+  theme_light()
+
+stop_words <- bind_rows(data.frame(word = stop_words$word), 
+                      data.frame(word = stopwords::stopwords(source = 'smart')),
+                      data.frame(word = c(tolower(unique(data$actor)))))
+
+data %>% 
+  unnest_tokens(word, text) %>% 
+  anti_join(stop_words) %>% 
+  count(word, sort = T) %>% 
+  top_n(10, wt = n) %>%
+  ggplot(aes(reorder(word, n), n)) +
+  geom_col(fill = "cyan4", alpha = 0.8, show.legend = F) +
+  labs(title = 'Most frequent words in the series excluding names',
+       x = NULL, y = NULL) +
+  coord_flip() +
+  scale_x_reordered() +
+  theme_light()
+```
+
+We can also look at the most frequent words by characters. For this I already excluded names. There are a lot of similarities between the most used words among them. Some of these are expletives so do not have any extra meaning for us. 
+
+```{r, echo=F, message=F, warning=F, fig.align='center', out.width="60%"}
+data %>% 
+  group_by(actor) %>% 
+  unnest_tokens(word, text) %>% 
+  ungroup() %>% 
+  anti_join(stop_words) %>%  
+  count(actor, word, sort = T) %>% 
+  group_by(actor) %>% 
+  top_n(10, wt = n) %>%
+  ungroup() %>% 
+  mutate(word = reorder_within(word, n, actor)) %>% 
+  ggplot(aes(word, n, fill = actor)) +
+  geom_col(show.legend = F) +
+  labs(title = 'Top words by people',
+       x = NULL, y = NULL) +
+  coord_flip() +
+  scale_x_reordered() +
+  facet_wrap(~actor, scales = 'free') +
+  theme_light()
+```
+
+In this second chart I excluded some of the words I felt are used as expletives. After this the words became more interesting. We already see some differences between characters that actually specific for them. For example Lily talked a lot about wedding and married. She and Marshall gets married in the series so this is cool that only from a few lines of code we already can already find out something about their story. Barney talks a lot about  hot, girls, while Robin who is a journalist talked a lot about tonight and news and her job of which is a centcal part of her life.
+
+```{r, echo=F, message=F, warning=F, fig.align='center', out.width="60%"}
+stop_words <- bind_rows(data.frame(word = stop_words$word), 
+                      data.frame(word = stopwords::stopwords(source = 'smart')),
+                      data.frame(word = c(tolower(unique(data$actor)))),
+                      data.frame(word = c('yeah', 'hey', 'wait', 'gonna', 'guy', 'guys', 'girl', 'time', 'lot', 'uh', "night", "god", "um")))
+
+data %>% 
+  group_by(actor) %>% 
+  unnest_tokens(word, text) %>% 
+  ungroup() %>% 
+  anti_join(stop_words) %>%  
+  count(actor, word, sort = T) %>% 
+  group_by(actor) %>% 
+  top_n(10, wt = n) %>%
+  ungroup() %>% 
+  mutate(word = reorder_within(word, n, actor)) %>% 
+  ggplot(aes(word, n, fill = actor)) +
+  geom_col(show.legend = F) +
+  labs(title = 'Top words by people',
+       x = NULL, y = NULL) +
+  coord_flip() +
+  scale_x_reordered() +
+  facet_wrap(~actor, scales = 'free') +
+  theme_light()
+```
+
+The following word clouds show the sale as the charts above, but I though this is a nice way to visualize the most frequent words. Below youcan see the most frequent words used by Ted, Barney and Lily.
+
+```{r, echo=F, message=F, warning=F, out.width="33%"}
+words <- data %>% 
+  group_by(actor) %>% 
+  unnest_tokens(word, text) %>% 
+  ungroup() %>% 
+  anti_join(stop_words) %>%  
+  count(actor, word, sort = T) 
+
+
+library(wordcloud)
+
+wordcloud(words = (words %>% filter(actor == 'Ted'))$word,
+          freq = (words %>% filter(actor== 'Ted'))$n, 
+          min.freq = 10, 
+          max.words = 20, colors = brewer.pal(10, 'YlGn'))
+
+wordcloud(words = (words %>% filter(actor == 'Barney'))$word,
+          freq = (words %>% filter(actor== 'Barney'))$n, 
+          min.freq = 10, 
+          max.words = 20, colors = brewer.pal(10, 'PuBu'))
+
+wordcloud(words = (words %>% filter(actor == 'Lily'))$word,
+          freq = (words %>% filter(actor== 'Lily'))$n, 
+          min.freq = 10, 
+          max.words = 20, colors = brewer.pal(10, 'RdPu'))
+```
+
+## Tf-idf on words by characters
+
+Word counts are cool but there are a lot of common words used by characters. For this we can to tf-ids and find unique words that are only typical for the characters. With this technique we already got much closer to find identifying words for the characters. For example for Lily we see Marshmallow as the first word. This is the nickname she calls Marshall most of the time. Very-very unique to her.
+
+```{r, echo=F, message=F, warning=F, fig.align='center', out.width="60%"}
+data %>% 
+  group_by(actor) %>% 
+  unnest_tokens(word, text) %>% 
+  ungroup() %>% 
+  mutate(word = lemmatize_words(word)) %>% 
+  count(actor, word, sort = T) %>% 
+  ungroup() %>% 
+  bind_tf_idf(term = word, document = actor, n = n) %>% 
+  group_by(actor) %>% 
+  top_n(7, wt = tf_idf) %>%
+  ungroup() %>% 
+  mutate(word = reorder_within(word, tf_idf, actor)) %>% 
+  ggplot(aes(word, tf_idf, fill = actor)) +
+  geom_col(show.legend = F) +
+  labs(title = "Typical words used by characters",
+       x = NULL, y = NULL) +
+  coord_flip() +
+  scale_x_reordered() +
+  facet_wrap(~actor, scales = 'free') +
+  theme_light()
+
+```
+
+Beside simple words we can also take word pairs following each other and create bigramms from them. This can be even more meaningful. Like in this case. I was amazed how unique word pairs were find. only from looking at the words a *How I met your mother* fan could really easily identify which character is that. In this case even only from the first word pairs. 
+
+```{r, echo=F, message=F, warning=F, fig.align='center', out.width="70%"}
+data %>% 
+  group_by(actor) %>% 
+  unnest_tokens(bigram, text, token = 'ngrams', n = 2) %>% 
+  ungroup() %>% 
+  separate(bigram, c('word_1', 'word_2'), sep = ' ') %>%
+  filter((!word_1 %in% stop_words$word) & 
+           (!word_2 %in% stop_words$word) & (word_1 != word_2)) %>% 
+  unite(bigram, word_1, word_2, sep = ' ') %>% 
+  count(actor, bigram, sort = T) %>% 
+  group_by(actor) %>% 
+  top_n(5, wt = n) %>% 
+  ungroup() %>% 
+  mutate(actor = as.factor(actor),
+         bigram = reorder_within(bigram, n, actor)) %>% 
+  ggplot(aes(bigram, n, fill = actor)) +
+  geom_col(show.legend = F) +
+  labs(title = "",
+       x = NULL, y = NULL) +
+  coord_flip() +
+  scale_x_reordered() +
+  facet_wrap(~actor, scales = 'free') +
+  theme_light()
+
+```
+
+
+## Sentiment analysis
+
+We already found some very unique words for the characters. Now lets look at the most positive and negative words they use. There are different sentiment libraries we may use. Here first I looked at Bing which has simply categorizing words into positive and negative.
+
+```{r, echo=F, message=F, warning=F, fig.align='center', out.width="70%"}
+data %>% 
+  group_by(actor) %>% 
+  unnest_tokens(word, text) %>% 
+  ungroup() %>% 
+  mutate(word = lemmatize_words(word)) %>% 
+  anti_join(stop_words) %>%  
+  inner_join(sentiments) %>% 
+  count(actor, word, sentiment, sort = T) %>% 
+  ungroup() %>% 
+  group_by(actor, sentiment) %>% 
+  top_n(5, wt = n) %>% 
+  ungroup() %>% 
+  mutate(n = ifelse(sentiment == 'positive', n, -n)) %>% 
+  mutate(actor = as.factor(actor),
+         word = reorder_within(word, n, actor)) %>% 
+  ggplot(aes(word, n, fill = sentiment)) +
+  geom_col(show.legend = F) +
+  labs(title = 'Most frequently used positive and negative words by characters using Bing',
+       x = NULL, y = NULL) +
+  coord_flip() +
+  scale_x_reordered() +
+  facet_wrap(~actor, scales = 'free') +
+  theme_light()
+```
+
+And than Afinn which gives a score between -5 and 5 for each word. There are slight differences in the outcomes. Afinn gave more positive words in the top 10. It is also interesting that love is at the top of all of the lists. this is due to the topic of the series as it is focused about relationships and love. 
+
+```{r, echo=F, message=F, warning=F, fig.align='center', out.width="70%"}
+data %>% 
+  group_by(actor) %>% 
+  unnest_tokens(word, text) %>% 
+  ungroup() %>% 
+  mutate(word = lemmatize_words(word)) %>% 
+  anti_join(stop_words) %>% 
+  count(actor, word, sort = T) %>% 
+  ungroup() %>% 
+  inner_join(get_sentiments(lexicon = 'afinn')) %>% 
+  mutate(sentiment_value = n * value) %>% 
+  group_by(actor) %>% 
+  top_n(10, wt = abs(sentiment_value)) %>% 
+  ungroup() %>% 
+  mutate(sentiment = ifelse(value < 0, 'negative', 'positive'),
+         word = reorder_within(word, sentiment_value, actor)) %>% 
+  ggplot(aes(word, sentiment_value, fill = sentiment)) +
+  geom_col(show.legend = F) +
+  labs(title = "Most frequently used positive and negative words by characters using afinn score * count",
+       x = NULL, y = 'Contributed sentiment score (score * count)') +
+  coord_flip() +
+  scale_x_reordered() +
+  facet_wrap(~actor, scales = 'free') +
+  theme_light()
+```
+
+
+We cannot only look at sentiment of words, but also bigger chucks of text as well. Below I looked at how the sentiment of the episodes change. I used all three sentiment dictionaries to compare them. NRC is the most positive it does not even gave negative sentiment any episodes. The two others gave pretty much the same. Bing is the most negative. 
+
+```{r, echo=F, message=F, warning=F, fig.align='center'}
+
+afinn <- data %>% 
+  unnest_tokens(word, text) %>% 
+  inner_join(get_sentiments('afinn')) %>% 
+  group_by(index = episode_num) %>% 
+  summarise(sentiment = sum(value)) %>% 
+  mutate(method = "Afinn")
+
+bing_and_nrc <- bind_rows(data %>% 
+  unnest_tokens(word, text) %>% 
+  inner_join(get_sentiments('bing')) %>% 
+  mutate(method = "Bing"),
+  data %>% 
+  unnest_tokens(word, text) %>% 
+  inner_join(get_sentiments('nrc') %>% 
+               filter(sentiment %in% c("positive", "negaive"))) %>% 
+  mutate(method = "NRC")) %>% 
+  count(method, index = episode_num, sentiment) %>% 
+  spread(sentiment, n, fill = 0) %>% 
+  mutate(sentiment = positive - negative)
+
+bind_rows(afinn,
+          bing_and_nrc) %>% 
+  ggplot(aes(index, sentiment, fill = method)) +
+  geom_col(show.legend = F) +
+  facet_wrap(~method, ncol = 1, scales = "free_y") +
+  labs(x = "Episode") +
+  theme_light()
+  
+```
+
+I also looked at sentiment on a seasonal level. With this we can see that the 3rd and 4th seasons were the less positive. This is where Marshall and Lily breaks up. Note that in this case huge amount of generalization was done. Different sentiment within the seasons are averaged out.
+
+```{r, echo=F, message=F, warning=F, fig.align='center'}
+
+afinn <- data %>% 
+  unnest_tokens(word, text) %>% 
+  inner_join(get_sentiments('afinn')) %>% 
+  group_by(index = season) %>% 
+  summarise(sentiment = sum(value)) %>% 
+  mutate(method = "Afinn")
+
+bing_and_nrc <- bind_rows(data %>% 
+  unnest_tokens(word, text) %>% 
+  inner_join(get_sentiments('bing')) %>% 
+  mutate(method = "Bing"),
+  data %>% 
+  unnest_tokens(word, text) %>% 
+  inner_join(get_sentiments('nrc') %>% 
+               filter(sentiment %in% c("positive", "negaive"))) %>% 
+  mutate(method = "NRC")) %>% 
+  count(method, index = season, sentiment) %>% 
+  spread(sentiment, n, fill = 0) %>% 
+  mutate(sentiment = positive - negative)
+
+bind_rows(afinn,
+          bing_and_nrc) %>% 
+  ggplot(aes(index, sentiment, fill = method)) +
+  geom_col(show.legend = F) +
+  facet_wrap(~method, ncol = 1, scales = "free_y") +
+  labs(x = "Season") +
+  theme_light()
+  
+```
+
+
+
+```{r, include=F}
+data_with_sentiments <- data %>% 
+  select(season, episode, episode_num, actor, text) %>% 
+  mutate(sentiment = sentimentr::sentiment_by(text)$ave_sentiment)
+```
+
+
+The same sentiment trends can be calculated by character as well. The below graph shows this. The trend looks linear so it does not point out any information significantly.
+
+```{r, echo=F, message=F, warning=F, fig.align='center', out.width="70%"}
+data_with_sentiments %>% 
+  filter(sentiment != 0) %>% 
+  group_by(episode_num, actor) %>% 
+  summarize(min_sentiment = min(sentiment),
+            max_sentiment = max(sentiment),
+            avg_sentiment = mean(sentiment)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = episode_num), fill = 'cyan4', color = 'cyan4') +
+  geom_line(aes(y = avg_sentiment), show.legend = F, alpha = 0.5) +
+  geom_ribbon(aes(ymin = min_sentiment, ymax = max_sentiment), fill = 'cyan4', alpha = 1/3, show.legend = F, color = NA) +
+  labs(title = "Sentiment trend analysis by person by episode",
+       x = 'Number of episode', y = NULL) +
+  facet_wrap(~actor) +
+  theme_light()
+
+
+
+```
+
+When we aggregate it by season the trend looks more meaningful. For Lily it drops really low in the 4th season. This is when she returns from San Francisco and talks about how much she struggled there and also fights a lot with Marshall.
+
+```{r,, echo=F, message=F, warning=F, fig.align='center', out.width="70%"}
+data_with_sentiments %>% 
+  filter(sentiment != 0) %>% 
+  group_by(season = as.numeric(season), actor) %>% 
+  summarize(median_sentiment = median(sentiment)) %>% # least and most positive episodes taken after minmax deletions
+  ungroup() %>% 
+  mutate(actor = as.factor(actor)) %>% 
+  ggplot(aes(x = season), fill = 'deeppink4', color = 'deeppink4') +
+  geom_line(aes(y = median_sentiment), show.legend = F, alpha = 0.5) +
+  geom_point(aes(y = median_sentiment), show.legend = F, color = 'deeppink4', fill = 'deeppink4') +
+  labs(title = "Sentiment trend analysis by person by episode",
+       x = 'Number of season', y = NULL) +
+  scale_x_continuous(breaks = seq(1, 9, by = 1)) +
+  facet_wrap(~actor) +
+  theme_light()
+
+```
+
+
+
+## Topic modelling
+
+In the last part I looked at different vocabularies. I used an LDA model and made it to find 5 groups/vocabularies. Then looked at which character uses which. It it sooo amazing how accurately the model divided the vocabularies of the 5 characters. All characters are assigned near 100% to one cluster. 
+
+```{r, echo=F, message=F, warning=F, fig.align='center', out.width="70%"}
+top_words <- data %>% 
+  group_by(actor) %>% 
+  unnest_tokens(word, text) %>% 
+  ungroup() %>% 
+  select(actor, word) %>% 
+  mutate(word = lemmatize_words(word)) %>% 
+  anti_join(stop_words) %>% 
+  count(actor, word, sort = T) %>% 
+  ungroup()
+
+top_words_dtm <- top_words %>% cast_dtm(actor, word, n)
+
+top_words_dtm_lda <- top_words_dtm %>% LDA(k = 5, control = list(seed = 8080))
+
+top_words_dtm_lda_gammas <- tidy(top_words_dtm_lda, matrix = 'gamma')
+
+top_words_dtm_lda_gammas %>%  
+  rename('actor' = 'document') %>% 
+  mutate(topic = as.factor(topic)) %>% 
+  ggplot(aes(topic, gamma, fill = actor)) + 
+  geom_point(show.legend = F) +
+  facet_wrap(~actor, scales = 'free') + 
+  labs(title = "Really significant differences in vocabulary used by characters",
+       x = '5 topics (clusters) from LDA algo',
+       y = '% of being assigned to one cluster') +
+  theme_light()
+
+```
+
+When looking at the most frequent words in the clusters we see a really similar graph that we had in the beginning when looking at most frequent words for out characters.
+
+```{r, echo=F, message=F, warning=F, fig.align='center', out.width="60%"}
+top_words_dtm_lda %>% 
+  tidy() %>% 
+  group_by(topic) %>% 
+  top_n(8, beta) %>% 
+  ungroup() %>% 
+  mutate(term = reorder(term, beta)) %>% 
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = F) +
+  facet_wrap(~topic, scales = "free_y") +
+  coord_flip() +
+  theme_light()
+  
+```
+
+
+## Summary
+From this small project you can see how powerful analysis can done with some lines of codes. These powerful tools can help to get useful insights from any kind of textual data. In out case we could easily find unique words for our characters and even ones that are in a way determining them. Also saw how the sentiment changes as the story goes and last but not least saw that and LDA model could identify our characters really easily.
+I hope you enjoyed this project and got a nice insight into some basic text analysis.
+
+
+
+
+
